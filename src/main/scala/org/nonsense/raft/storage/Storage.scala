@@ -1,4 +1,4 @@
-package org.nonsense.raft.model
+package org.nonsense.raft.storage
 
 import org.nonsense.raft.error.StorageError
 import org.nonsense.raft.model.RaftPB.{Entry, RaftState, Snapshot}
