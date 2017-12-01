@@ -1,10 +1,11 @@
 package org.nonsense.raft.storage
 
 import org.nonsense.raft.error.{Compacted, Unavailable}
-import org.nonsense.raft.model.RaftPB.Entry
-class RaftMemStorageTest extends UnitSpec {
+import org.nonsense.raft.protos.Protos.Entry
+
+class RaftMemStorageTest extends UnitSpec with ProtoHelper  {
   test("storage term") {
-    val ents: Vector[Entry] = Range(3, 6).map(r => Entry(index = r, term = r)).toVector
+    val ents: Vector[Entry] = Range(3, 6).map(r => newEntry(r, r)).toVector
 
     val tests = List(
       (2, Right(Compacted)),
@@ -22,7 +23,7 @@ class RaftMemStorageTest extends UnitSpec {
   }
 
   test("storage entries") {
-    val ents: Vector[Entry] = Range(3, 7).map(r => Entry(index = r, term = r)).toVector
+    val ents: Vector[Entry] = Range(3, 7).map(r => newEntry(r, r)).toVector
 
     val test = List(
       (2, 6, Long.MaxValue, Right(Compacted)),
