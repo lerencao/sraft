@@ -4,7 +4,7 @@ import org.nonsense.raft.protos.Protos.{Entry, Snapshot}
 
 import scala.collection.mutable.ArrayBuffer
 
-case class Unstable (
+case class Unstable(
   var snapshot: Option[Snapshot] = None,
   var offset: Long = 0,
   // buffer is mutable
@@ -17,10 +17,10 @@ case class Unstable (
   }
 
   def maybeLastIndex(): Option[Long] = {
-     entries.length match {
-       case 0 => snapshot.map(s => s.getMetadata.getIndex)
-       case len: Int => Some(offset + len - 1)
-     }
+    entries.length match {
+      case 0        => snapshot.map(s => s.getMetadata.getIndex)
+      case len: Int => Some(offset + len - 1)
+    }
   }
 
   def maybeTerm(idx: Long): Option[Long] = {
@@ -67,7 +67,8 @@ case class Unstable (
       this.entries.trimEnd(truncateNum.toInt)
       this.entries.appendAll(ents)
     } else {
-      throw new IndexOutOfBoundsException(s"$after is out of bound [$offset, ${offset + entries.length})")
+      throw new IndexOutOfBoundsException(
+        s"$after is out of bound [$offset, ${offset + entries.length})")
     }
   }
 

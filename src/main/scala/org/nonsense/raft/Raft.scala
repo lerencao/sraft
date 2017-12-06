@@ -14,17 +14,15 @@ import scala.collection.mutable.{Buffer => MutableBuffer}
 import scala.concurrent.forkjoin.ThreadLocalRandom
 
 sealed trait ReadOnlyOption
+
 object ReadOnlyOption {
-  object Safe extends ReadOnlyOption
+  object Safe       extends ReadOnlyOption
   object LeaseBased extends ReadOnlyOption
 }
 
 sealed trait RaftInternalMessage
 object ElectionTimeoutMsg extends RaftInternalMessage
-object VoteSelfMsg extends RaftInternalMessage
-
-
-
+object VoteSelfMsg        extends RaftInternalMessage
 
 case class Config(
   id: Long = 0,
@@ -44,7 +42,7 @@ case class Config(
 //sealed trait RaftRole[T <: Storage]
 case class SoftState(leaderId: Long = RaftPeer.INVALID_ID, stateRole: RaftRole = Follower)
 
-case class RaftPeer[T <: Storage] private(
+case class RaftPeer[T <: Storage] private (
   log: RaftLog[T],
   config: Config,
   tag: String,
@@ -58,18 +56,20 @@ case class RaftPeer[T <: Storage] private(
   var heartbeatElapsed: Int = 0,
   var randomizedElectionTimeout: Int = 0,
   msgs: MutableBuffer[RaftMessage] = MutableBuffer()
-)  {
+) {
   def addNode(id: NodeId): Unit = ???
 
-  def hardState: HardState = HardState.newBuilder.setTerm(this.term).setVote(this.vote).setCommit(this.log.committed).build()
+  def hardState: HardState =
+    HardState.newBuilder.setTerm(this.term).setVote(this.vote).setCommit(this.log.committed).build()
   def softState: SoftState = SoftState(leaderId = this.leaderId, stateRole = this.state)
 
   private def resetRandomizedElectionTimeout(): Unit = {
     val prevTimeout = this.randomizedElectionTimeout
-    val timeout = ThreadLocalRandom.current().nextInt(this.config.electionTimeout, 2 * this.config.electionTimeout)
+    val timeout = ThreadLocalRandom
+      .current()
+      .nextInt(this.config.electionTimeout, 2 * this.config.electionTimeout)
     this.randomizedElectionTimeout = timeout
   }
-
 
   def becomeFollower(term: Long, leaderId: NodeId): Unit = {
     this.reset(term)
@@ -102,14 +102,19 @@ case class RaftPeer[T <: Storage] private(
 }
 
 object RaftPeer {
-  val logger = Logger(this.getClass)
+  val logger             = Logger(this.getClass)
   val INVALID_ID: NodeId = 0
-  def apply[T <: Storage](store: T, peers: Seq[NodeId], applied: Long, config: Config): RaftPeer[T] = {
+
+  def apply[T <: Storage](store: T,
+                          peers: Seq[NodeId],
+                          applied: Long,
+                          config: Config): RaftPeer[T] = {
     import scala.collection.JavaConverters._
 
     val raftState = store.initialState().left.get
     if (raftState.confState.getNodesCount > 0 && peers.nonEmpty) {
-      throw new IllegalArgumentException(s"cannot specify both new($peers) and ConfState.Nodes(${raftState.confState.getNodesList})")
+      throw new IllegalArgumentException(
+        s"cannot specify both new($peers) and ConfState.Nodes(${raftState.confState.getNodesList})")
     }
     val prs: Seq[NodeId] = if (peers.nonEmpty) {
       peers
@@ -130,12 +135,16 @@ object RaftPeer {
     )
 
     follower.becomeFollower(raftState.hardState.getTerm, INVALID_ID)
-    logger.info("{} newRaft [peers: {}, term: {}, commit: {}, applied: {}, last_index: {}, last_term: {}]",
-      follower.tag, follower.peers, follower.term,
-      follower.log.committed, follower.log.applied,
-      follower.log.lastIndex, follower.log.lastTerm
+    logger.info(
+      "{} newRaft [peers: {}, term: {}, commit: {}, applied: {}, last_index: {}, last_term: {}]",
+      follower.tag,
+      follower.peers,
+      follower.term,
+      follower.log.committed,
+      follower.log.applied,
+      follower.log.lastIndex,
+      follower.log.lastTerm
     )
     follower
   }
 }
-

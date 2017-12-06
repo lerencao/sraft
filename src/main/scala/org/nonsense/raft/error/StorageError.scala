@@ -24,6 +24,6 @@ case object SnapshotTemporarilyUnavailable extends StorageError {
 }
 
 case class Other(error: Error) extends StorageError {
-  val desc: String = error.getMessage
+  val desc: String   = error.getMessage
   override val cause = Some(error)
 }

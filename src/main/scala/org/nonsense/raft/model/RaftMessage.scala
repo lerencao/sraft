@@ -21,10 +21,11 @@ case class RaftMessage(
 
 object RaftMessage {
   type MessageType = Long
+
   def apply(to: NodeId, msgType: MessageType, from: Option[NodeId]): RaftMessage = {
     val msg = RaftMessage(msgType = msgType, to = to)
     from match {
-      case None => msg
+      case None    => msg
       case Some(f) => msg.copy(from = f)
     }
   }

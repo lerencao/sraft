@@ -7,8 +7,8 @@ import org.nonsense.raft.protos.Protos._
 import org.nonsense.raft.storage.Storage.Result
 
 class RaftMemStorage(
-    private var entries: Vector[Entry] = Vector(),
-    private var hardState: HardState = HardState.getDefaultInstance
+  private var entries: Vector[Entry] = Vector(),
+  private var hardState: HardState = HardState.getDefaultInstance
 ) extends Storage {
   private var snap: Snapshot                = Snapshot.getDefaultInstance
   override def snapshot(): Result[Snapshot] = Left(snap)
@@ -58,8 +58,8 @@ class RaftMemStorage(
 
   def append(ents: Vector[Entry]): Result[Unit] = {
     ents.length match {
-      case 0 => Left(Unit)
-      case _ if ents.head.getIndex > innerLastIndex => Right(EntryMissing)
+      case 0                                                            => Left(Unit)
+      case _ if ents.head.getIndex > innerLastIndex                     => Right(EntryMissing)
       case elen: Int if ents.head.getIndex + elen - 1 < innerFirstIndex => Left(Unit)
       case _ =>
         val first = ents.head.getIndex
@@ -79,7 +79,8 @@ class RaftMemStorage(
     if (compactIndex <= offset) {
       Right(Compacted)
     } else if (compactIndex > innerLastIndex) {
-      throw new IndexOutOfBoundsException(s"compact $compactIndex is out of bound lastindex($innerLastIndex)")
+      throw new IndexOutOfBoundsException(
+        s"compact $compactIndex is out of bound lastindex($innerLastIndex)")
     } else {
       val i = (compactIndex - offset).toInt
       entries = entries.drop(i)
@@ -87,11 +88,14 @@ class RaftMemStorage(
     }
   }
 
-  def createSnapshot(idx: Long, confState: Option[ConfState], data: Array[Byte]): Result[Snapshot] = {
+  def createSnapshot(idx: Long,
+                     confState: Option[ConfState],
+                     data: Array[Byte]): Result[Snapshot] = {
     if (idx <= snap.getMetadata.getIndex) {
       Right(SnapshotOutofDate)
     } else if (idx > innerLastIndex) {
-      throw new IndexOutOfBoundsException(s"snapshot $idx is out of bound lastindex($innerLastIndex)")
+      throw new IndexOutOfBoundsException(
+        s"snapshot $idx is out of bound lastindex($innerLastIndex)")
     } else {
       val offset    = idx - entries(0).getIndex
       val termOfIdx = entries(offset.toInt).getTerm
@@ -100,7 +104,8 @@ class RaftMemStorage(
         meta.setConfState(cs)
       }
 
-      this.snap = Snapshot.newBuilder(snap).setData(ByteString.copyFrom(data)).setMetadata(meta).build()
+      this.snap =
+        Snapshot.newBuilder(snap).setData(ByteString.copyFrom(data)).setMetadata(meta).build()
 
       snapshot()
     }

@@ -3,7 +3,7 @@ package org.nonsense.raft.storage
 import org.nonsense.raft.error.{Compacted, Unavailable}
 import org.nonsense.raft.protos.Protos.Entry
 
-class RaftMemStorageTest extends UnitSpec with ProtoHelper  {
+class RaftMemStorageTest extends UnitSpec with ProtoHelper {
   test("storage term") {
     val ents: Vector[Entry] = Range(3, 6).map(r => newEntry(r, r)).toVector
 
@@ -17,7 +17,7 @@ class RaftMemStorageTest extends UnitSpec with ProtoHelper  {
 
     for (elem <- tests) {
       val storage = new RaftMemStorage(ents)
-      val t = storage.term(elem._1)
+      val t       = storage.term(elem._1)
       assert(t == elem._2)
     }
   }
@@ -34,7 +34,7 @@ class RaftMemStorageTest extends UnitSpec with ProtoHelper  {
 
     for ((low, high, maxSize, expected) <- test) {
       val storage = new RaftMemStorage(ents)
-      val actual = storage.entries(low, high, maxSize)
+      val actual  = storage.entries(low, high, maxSize)
       assert(actual == expected)
     }
   }

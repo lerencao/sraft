@@ -18,25 +18,25 @@ case class RaftLog[T <: Storage] private (
 ) {
   def append(ents: Seq[Entry]) = ???
 
-
   def firstIndex: Long = {
     unstable.maybeFirstIndex() match {
       case Some(idx) => idx
-      case None => this.store.firstIndex().left.get
+      case None      => this.store.firstIndex().left.get
     }
   }
 
   def lastIndex: Long = {
     unstable.maybeLastIndex() match {
       case Some(idx) => idx
-      case None => this.store.lastIndex().left.get
+      case None      => this.store.lastIndex().left.get
     }
   }
 
   def lastTerm: Long = {
     this.term(this.lastIndex) match {
       case Left(t) => t
-      case Right(e) => throw new RuntimeException(s"unexpected error when getting the last term: $e")
+      case Right(e) =>
+        throw new RuntimeException(s"unexpected error when getting the last term: $e")
     }
   }
 
@@ -47,7 +47,7 @@ case class RaftLog[T <: Storage] private (
     } else {
       unstable.maybeTerm(idx) match {
         case Some(term) => Left(term)
-        case None => this.store.term(idx)
+        case None       => this.store.term(idx)
       }
     }
   }
@@ -84,7 +84,8 @@ case class RaftLog[T <: Storage] private (
       if (this.applied <= idx && idx <= this.committed) {
         this.applied = idx
       } else {
-        throw new RuntimeException(s"$tag applied($idx) is out of range [prev_applied(${this.applied}), committed(${this.committed})]")
+        throw new RuntimeException(
+          s"$tag applied($idx) is out of range [prev_applied(${this.applied}), committed(${this.committed})]")
       }
     }
   }
@@ -104,8 +105,8 @@ object RaftLog {
   def apply[T <: Storage](store: T, applied: Long, tag: String): RaftLog[T] = {
     assert(applied >= 0)
     val firstIndex = store.firstIndex().left.get
-    val lastIndex = store.lastIndex().left.get
-    val rs = store.initialState().left.get
+    val lastIndex  = store.lastIndex().left.get
+    val rs         = store.initialState().left.get
 
     val log = RaftLog(
       store = store,

@@ -80,18 +80,21 @@ class UnstableTest extends UnitSpec with ProtoHelper {
     )
 
     for ((entries, offset, snapshot, index, wok, wterm) <- tests) {
-      val u = Unstable(entries = ArrayBuffer(entries.toList: _*), offset = offset, snapshot = snapshot)
+      val u =
+        Unstable(entries = ArrayBuffer(entries.toList: _*), offset = offset, snapshot = snapshot)
 
       val term = u.maybeTerm(index)
       term match {
-        case None => assert(!wok)
+        case None    => assert(!wok)
         case Some(t) => assert(t == wterm)
       }
     }
   }
 
   test("restore") {
-    val u = Unstable(snapshot = Some(newSnapshot(4, 1)), offset = 5, entries = ArrayBuffer(newEntry(5, 1)))
+    val u = Unstable(snapshot = Some(newSnapshot(4, 1)),
+                     offset = 5,
+                     entries = ArrayBuffer(newEntry(5, 1)))
     val s = newSnapshot(6, 2)
     u.restore(s)
     assert(u.entries.isEmpty)
@@ -177,7 +180,6 @@ class UnstableTest extends UnitSpec with ProtoHelper {
     }
   }
 
-
   test("Truncate and append") {
     val tests = List(
       // replace to the end
@@ -189,7 +191,6 @@ class UnstableTest extends UnitSpec with ProtoHelper {
         5,
         ArrayBuffer(newEntry(5, 1), newEntry(6, 1), newEntry(7, 1))
       ),
-
       // replace to unstable entries
       (
         ArrayBuffer(newEntry(5, 1)),
@@ -199,7 +200,6 @@ class UnstableTest extends UnitSpec with ProtoHelper {
         5,
         ArrayBuffer(newEntry(5, 2), newEntry(6, 2))
       ),
-
       (
         ArrayBuffer(newEntry(5, 1)),
         5,
@@ -208,7 +208,6 @@ class UnstableTest extends UnitSpec with ProtoHelper {
         4,
         ArrayBuffer(newEntry(4, 2), newEntry(5, 2), newEntry(6, 2))
       ),
-
       // truncate existing entries and append
       (
         ArrayBuffer(newEntry(5, 1), newEntry(6, 1), newEntry(7, 1)),
@@ -218,7 +217,6 @@ class UnstableTest extends UnitSpec with ProtoHelper {
         5,
         ArrayBuffer(newEntry(5, 1), newEntry(6, 2))
       ),
-
       (
         ArrayBuffer(newEntry(5, 1), newEntry(6, 1), newEntry(7, 1)),
         5,
