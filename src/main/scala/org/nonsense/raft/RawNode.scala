@@ -1,6 +1,7 @@
 package org.nonsense.raft
 
 import com.google.protobuf.ByteString
+import org.nonsense.raft.model.RaftPB.INVALID_ID
 import org.nonsense.raft.protos.Protos._
 import org.nonsense.raft.storage.Storage
 
@@ -14,15 +15,25 @@ case class Peer(id: Long, context: Option[Array[Byte]])
 
 object RawNode {
 
-  def apply[T <: Storage](config: Config, store: T, peers: Seq[Peer]): RawNode[T] = {
-    assert(config.id != 0, "config.id must not be zero")
-    val r         = RaftPeer(config = config, store = store, peers = config.peers, applied = config.applied)
+  def apply[T <: Storage](id: Long,
+                          tag: String,
+                          applied: Long,
+                          config: Config,
+                          store: T,
+                          peers: Seq[Peer]): RawNode[T] = {
+    assert(id != 0, "config.id must not be zero")
+    val r = RaftPeer(id = id,
+                     tag = tag,
+                     config = config,
+                     store = store,
+                     peers = peers.map(p => p.id),
+                     applied = applied)
     val lastIndex = r.log.lastIndex
 
     if (lastIndex == 0) {
       val initialTerm  = 1
       val initialIndex = 1
-      r.becomeFollower(initialTerm, RaftPeer.INVALID_ID)
+      r.becomeFollower(initialTerm, INVALID_ID)
       val entries: Seq[Entry] = peers.zipWithIndex.map {
         case (p, idx) =>
           val cc = ConfChange.newBuilder().setChangeType(ConfChangeType.AddNode).setNodeId(p.id)
