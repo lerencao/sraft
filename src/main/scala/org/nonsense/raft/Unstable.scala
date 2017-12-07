@@ -2,6 +2,7 @@ package org.nonsense.raft
 
 import org.nonsense.raft.protos.Protos.{Entry, Snapshot}
 
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 case class Unstable(
@@ -72,7 +73,7 @@ case class Unstable(
     }
   }
 
-  def slice(low: Long, high: Long): Seq[Entry] = {
+  def slice(low: Long, high: Long): mutable.Buffer[Entry] = {
     if (low > high) {
       throw new IllegalArgumentException(s"invalid slice: $low > $high")
     }

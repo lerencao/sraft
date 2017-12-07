@@ -18,4 +18,7 @@ case class FollowerState() extends RoleState
 case class CandidateState(
   votes: MutableMap[NodeId, Boolean] = MutableMap()
 ) extends RoleState
-case class LeaderState(prs: MutableMap[NodeId, Progress]) extends RoleState
+case class LeaderState(
+  progresses: MutableMap[NodeId, Progress] = MutableMap(),
+  var pendingConf: Boolean = false
+) extends RoleState

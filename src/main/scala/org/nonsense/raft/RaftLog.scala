@@ -4,10 +4,16 @@
 
 package org.nonsense.raft
 import org.nonsense.raft.RaftLog.RaftResult
-import org.nonsense.raft.error.StorageError
+import org.nonsense.raft.error.{Compacted, StorageError, Unavailable}
+import org.nonsense.raft.model.RaftPB
+import org.nonsense.raft.model.RaftPB.{IndexT, TermT}
 import org.nonsense.raft.protos.Protos.Entry
 import org.nonsense.raft.storage.Storage
+import org.nonsense.raft.storage.Storage.StorageResult
 import org.nonsense.raft.utils.{Err, Ok, Result}
+
+import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 
 case class RaftLog[T <: Storage] private (
   store: T,
@@ -16,7 +22,106 @@ case class RaftLog[T <: Storage] private (
   var applied: Long,
   tag: String
 ) {
+
+  def maybeCommit(maxIdx: IndexT, term: TermT): Boolean = {
+    // always commit log of my term
+    if (maxIdx > this.committed && this.term(maxIdx).getOrElse(0) == term) {
+      this.commitTo(maxIdx)
+      true
+    } else {
+      false
+    }
+  }
+
+  def commitTo(toCommit: RaftPB.IndexT): Unit = {
+    if (toCommit > this.lastIndex) {
+      throw new Exception(s"$tag to_commit {} is out of range [last_index ${this.lastIndex}]")
+    } else if (toCommit <= this.committed) {
+      // never decrease commit
+    } else { // now this.commited < toCommit <= this.lastIndex
+      this.committed = toCommit
+    }
+  }
+
+  /**
+    * make sure  lastIdx <= low <= high <= lastIdx + 1
+    * @param low
+    * @param high
+    * @return err if not inbound
+    */
+  private def checkOutOfBounds(low: Long, high: Long) = {
+    if (low > high) {
+      throw new IllegalArgumentException(s"invalid slice $low > $high")
+    }
+
+    val firstIdx  = this.firstIndex
+    val lastIndex = this.lastIndex
+    if (low < firstIdx) {
+      Some(Compacted)
+    } else if (high > lastIndex + 1) {
+      throw new IllegalArgumentException(s"slice[$low, $high] out of bound[$firstIdx, $lastIndex]")
+    } else {
+      None
+    }
+  }
+
   def append(ents: Seq[Entry]) = ???
+
+  /**
+    * get entry slice,
+    * @param low inclusive
+    * @param high exclusive
+    * @param maxSize max size
+    * @return
+    */
+  def slice(low: IndexT, high: IndexT, maxSize: Long): StorageResult[mutable.Buffer[Entry]] = {
+    val err = this.checkOutOfBounds(low, high)
+    if (err.nonEmpty) {
+      return Err(err.get)
+    }
+
+    if (low == high) {
+      return Ok(new ArrayBuffer[Entry](0))
+    }
+
+    val unstableOffset           = this.unstable.offset
+    var ents: ArrayBuffer[Entry] = new ArrayBuffer[Entry](16)
+
+    if (low < unstableOffset) {
+      val stableHigh = Math.min(high, unstableOffset)
+      val stableEnts = this.store.entries(low, stableHigh, maxSize)
+      stableEnts match {
+        case Err(e @ Compacted) => return Err(e)
+        case Err(Unavailable) =>
+          throw new Exception(s"entries[$low:$stableHigh] is unavailabe from storage")
+        case Err(e) => throw new Exception(s"unexpected error: $e")
+        case _      =>
+      }
+      ents.appendAll(stableEnts.get)
+      // it means that the maxSize is reached, we can return now
+      if (ents.length < stableHigh - low) {
+        return Ok(ents)
+      }
+    }
+
+    if (high > unstableOffset) {
+      val unstableLow              = Math.max(low, unstableOffset)
+      val unstableEnts: Seq[Entry] = this.unstable.slice(unstableLow, high)
+      ents.appendAll(unstableEnts)
+    }
+
+    RaftPB.limitSize(ents, maxSize)
+    Ok(ents)
+  }
+
+  def entries(idx: IndexT, maxSize: Long): RaftResult[mutable.Buffer[Entry]] = {
+    val lastIdx = this.lastIndex
+    if (idx > lastIdx) {
+      Ok(mutable.Buffer())
+    } else {
+      this.slice(idx, lastIdx + 1, maxSize)
+    }
+  }
 
   def firstIndex: Long = {
     unstable.maybeFirstIndex() match {
@@ -92,6 +197,7 @@ case class RaftLog[T <: Storage] private (
 }
 
 object RaftLog {
+  val NO_LIMIT = Long.MaxValue
   type RaftResult[T] = Result[T, StorageError]
 
   /**

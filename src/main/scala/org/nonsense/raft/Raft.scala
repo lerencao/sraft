@@ -7,12 +7,13 @@ import com.google.protobuf.ByteString
 import com.typesafe.scalalogging.Logger
 import org.nonsense.raft.RaftLog.RaftResult
 import org.nonsense.raft.ReadOnlyOption.Safe
-import org.nonsense.raft.model.RaftMessage
 import org.nonsense.raft.model.RaftPB.{INVALID_ID, NodeId, TermT}
+import org.nonsense.raft.protos.Protos
 import org.nonsense.raft.protos.Protos._
 import org.nonsense.raft.storage.Storage
 import org.nonsense.raft.utils.Ok
 
+import scala.collection.mutable
 import scala.collection.mutable.{Buffer => MutableBuffer, Set => MutableSet}
 import scala.concurrent.forkjoin.ThreadLocalRandom
 
@@ -58,7 +59,7 @@ case class RaftPeer[T <: Storage] private (
   var heartbeatElapsed: Int = 0,
   var randomizedElectionTimeout: Int = 0,
   var states: RoleState = FollowerState(),
-  msgs: MutableBuffer[RaftMessage] = MutableBuffer()
+  msgs: MutableBuffer[Message] = MutableBuffer()
 ) {
   def onReadIndex(msg: Message): Unit = ???
 
@@ -99,7 +100,8 @@ case class RaftPeer[T <: Storage] private (
     }
   }
 
-  def nodes: Seq[NodeId] = peers.toStream.sorted
+  def nodes: Seq[NodeId]  = peers.toStream.sorted
+  @inline def quorum: Int = this.peers.size / 2 + 1
 
   def hardState: HardState =
     HardState.newBuilder.setTerm(this.term).setVote(this.vote).setCommit(this.log.committed).build()
@@ -116,13 +118,103 @@ case class RaftPeer[T <: Storage] private (
 
   def onCampaign(msg: Message): RaftResult[Unit] = {
     this.states match {
-      // just do nothing if I am leader
-      case _: LeaderState =>
-      case _              =>
-//        this.log.slice(this.log.applied + 1, this.log.committed + 1)
+      case _: LeaderState => // just do nothing if I am leader
+        logger.debug("ignoring Campaign because already leader")
+      case _ =>
+        val ents =
+          this.log
+            .slice(this.log.applied + 1, this.log.committed + 1, RaftLog.NO_LIMIT)
+            .unwrap("unexpected error when getting unapplied entries")
+        val n = RaftPeer.numOfPendingConf(ents)
+        // TODO: need to check `committed` > `applied`
+        if (n != 0) {
+          logger.warn(
+            s"cannot campaign at term ${this.term} " +
+              s"since there are still $n pending conf changes to apply")
+        } else {
+          logger.info(s"starting a new election at term ${this.term}")
+          this.doCampaign(RaftPeer.CAMPAIGN_ELECTION)
+        }
+    }
+    Ok(Unit)
+  }
+
+  private def doCampaign(campaignType: String): Unit = {
+    this.becomeCandidate()
+    val (voteMsgType, term) = (MessageType.MsgRequestVote, this.term)
+
+    // after become candidate(and vote for my self), check if I can become leader
+    if (this.poll(this.id, voteRespMsgType(voteMsgType), approve = true) == this.quorum) {
+      if (campaignType == RaftPeer.CAMPAIGN_ELECTION) {
+        this.becomeLeader()
+      }
+    } else {
+      for { peer <- this.peers if peer != this.id } {
+        logger.info("")
+        val m = Message
+          .newBuilder()
+          .setTo(peer)
+          .setMsgType(voteMsgType)
+          .setFrom(this.id)
+          .setTerm(term)
+          .setIndex(this.log.lastIndex)
+          .setLogTerm(this.log.lastTerm)
+        if (campaignType == RaftPeer.CAMPAIGN_TRANSFER) {
+          m.setContext(ByteString.copyFromUtf8(RaftPeer.CAMPAIGN_ELECTION))
+        }
+        this.send(m)
+      }
+    }
+  }
+
+  private def send(msg: Message.Builder): Unit = {
+    msg.setFrom(this.id)
+    if (msg.getMsgType == MessageType.MsgRequestPreVote) {
+      // if term is unset when request vote
+      if (msg.getTerm == 0) {
+        // Pre-vote RPCs are sent at a term other than our actual term, so the code
+        // that sends these messages is responsible for setting the term.
+        throw new Exception(s"$tag term should be set when sending ${msg.getMsgType}")
+      }
+    } else {
+      if (msg.getTerm != 0) {
+        throw new Exception(
+          s"$tag term should not be set when sending ${msg.getMsgType}, was ${msg.getTerm}")
+      } else if (msg.getMsgType == MessageType.MsgPropose || msg.getMsgType == MessageType.MsgReadIndex) {
+        // do not attach term to MsgPropose, MsgReadIndex
+        // proposals are a way to forward to the leader and
+        // should be treated as local message.
+        // MsgReadIndex is also forwarded to leader.
+      } else {
+        msg.setTerm(this.term)
+      }
     }
 
-    Ok(Unit)
+    this.msgs.append(msg.build())
+  }
+
+  private def voteRespMsgType(messageType: MessageType): MessageType = {
+    messageType match {
+      case MessageType.MsgRequestVote => MessageType.MsgRequestVoteResponse
+      case _                          => throw new Exception(s"Not a vote message: $messageType")
+    }
+  }
+  private def poll(id: NodeId, messageType: MessageType, approve: Boolean): Int = {
+    logger.info(
+      s"{} receive {} {} from {} at term {}",
+      this.tag,
+      messageType,
+      if (approve) { "approve" } else { "rejection" },
+      id,
+      this.term
+    )
+
+    this.states match {
+      case CandidateState(votes) =>
+        votes.getOrElseUpdate(id, approve)
+        votes.count { case (_, x) => x }
+      case _ => throw new IllegalStateException(s"$tag cannot poll in state ${this.state}")
+    }
   }
 
   private def resetRandomizedElectionTimeout(): Unit = {
@@ -140,12 +232,85 @@ case class RaftPeer[T <: Storage] private (
     logger.info(s"$tag become follower at term($term), leader_id($leaderId)")
   }
 
+  def becomeCandidate(): Unit = {
+    assert(this.state != Leader, s"$tag invalid transition [leader -> candidate]")
+    val myTerm = this.term + 1
+    this.reset(myTerm)
+    val myself = this.id
+    this.vote = myself
+    this.states = CandidateState()
+    logger.info(s"$tag become candidate at term $term")
+  }
+
+  private def becomeLeader(): Unit = {
+    assert(this.state != Follower, "invalid transition [follower -> leader]")
+    this.reset(this.term)
+    // I am the leader
+    this.leaderId = this.id
+
+    // TODO: init progress
+    val myState = LeaderState(progresses = mutable.Map())
+
+    val begin = this.log.committed + 1
+    val ents = this.log
+      .entries(begin, RaftLog.NO_LIMIT)
+      .unwrap("unexpected error getting uncommitted entries")
+    val numOfConf = RaftPeer.numOfPendingConf(ents)
+    if (numOfConf > 1) {
+      throw new Exception(s"$tag unexpected double uncommitted config entry")
+    }
+
+    if (numOfConf == 1) {
+      myState.pendingConf = true
+    }
+    this.states = myState
+    this.appendEntry(mutable.Buffer(Entry.newBuilder()))
+    logger.info("{} became leader at term {}", this.tag, this.term)
+  }
+
+  private def appendEntry(partialEnts: mutable.Buffer[Protos.Entry.Builder]): Unit = {
+    val lastIdx = this.log.lastIndex
+    val myTerm  = this.term
+
+    val ents = for { (e, i) <- partialEnts.zipWithIndex } yield {
+      e.setTerm(myTerm)
+      e.setIndex(lastIdx + 1 + i)
+      e.build()
+    }
+    this.log.append(ents)
+
+    this.states match {
+      case LeaderState(progresses, _) =>
+        progresses(this.id).maybeUpdate(this.log.lastIndex)
+      case _ => throw new Exception("can only append entry in leader state")
+    }
+    // Regardless of maybe_commit's return, our caller will call bcastAppend.
+    // TODO: review our caller
+    this.maybeCommit()
+  }
+
+  // maybe_commit attempts to advance the commit index. Returns true if
+  // the commit index changed (in which case the caller should call
+  // r.bcast_append).
+  private def maybeCommit(): Boolean = {
+    this.states match {
+      case LeaderState(progresses, _) =>
+        val mis = progresses.values
+          .map(p => p.matched)
+          .toBuffer
+          .sortWith((a, b) => a > b)
+        val mci = mis(this.quorum - 1)
+        this.log.maybeCommit(mci, this.term)
+      case _ => false
+    }
+  }
+
   def addNode(id: NodeId): Unit = {
     this.peers.add(id)
 
     // only leader role needs to add new progress
     this.states match {
-      case LeaderState(prs) if !prs.contains(id) =>
+      case LeaderState(prs, _) if !prs.contains(id) =>
         // TODO: handle leader state change
         val lastIdx = this.log.lastIndex
         val p       = Progress(0L, lastIdx + 1, this.config.maxInflightMegs)
@@ -180,6 +345,9 @@ case class RaftPeer[T <: Storage] private (
 
 object RaftPeer {
   val logger = Logger(this.getClass)
+
+  val CAMPAIGN_ELECTION = "CampaignElection"
+  val CAMPAIGN_TRANSFER = "CampaignTransfer"
 
   def apply[T <: Storage](store: T,
                           id: NodeId,
@@ -219,4 +387,7 @@ object RaftPeer {
     )
     follower
   }
+
+  def numOfPendingConf(entries: mutable.Buffer[Entry]): Int =
+    entries.count(e => e.getEntryType == EntryType.EntryConfChange)
 }
