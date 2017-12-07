@@ -3,12 +3,15 @@
   */
 package org.nonsense.raft
 
+import com.google.protobuf.ByteString
 import com.typesafe.scalalogging.Logger
+import org.nonsense.raft.RaftLog.RaftResult
 import org.nonsense.raft.ReadOnlyOption.Safe
 import org.nonsense.raft.model.RaftMessage
-import org.nonsense.raft.model.RaftPB.{INVALID_ID, NodeId}
+import org.nonsense.raft.model.RaftPB.{INVALID_ID, NodeId, TermT}
 import org.nonsense.raft.protos.Protos._
 import org.nonsense.raft.storage.Storage
+import org.nonsense.raft.utils.Ok
 
 import scala.collection.mutable.{Buffer => MutableBuffer, Set => MutableSet}
 import scala.concurrent.forkjoin.ThreadLocalRandom
@@ -32,7 +35,7 @@ case class Config(
   electionTimeout: Int = 0,
   heartbeatTimeout: Int = 0,
   maxSizePerMsg: Long = 0,
-  maxInflightMegs: Long = 0,
+  maxInflightMegs: Int = 0,
   checkQuorum: Boolean = false,
   preVote: Boolean = false,
   readOnlyOptions: ReadOnlyOption = Safe,
@@ -48,33 +51,79 @@ case class RaftPeer[T <: Storage] private (
   tag: String,
   id: NodeId,
   var peers: MutableSet[NodeId],
-  var term: Long,
+  var term: TermT,
   var vote: NodeId,
   var leaderId: NodeId = 0,
   var electionElapsed: Int = 0,
   var heartbeatElapsed: Int = 0,
   var randomizedElectionTimeout: Int = 0,
-  var state: RaftRole = Follower,
   var states: RoleState = FollowerState(),
   msgs: MutableBuffer[RaftMessage] = MutableBuffer()
 ) {
+  def onReadIndex(msg: Message): Unit = ???
 
-  def nodes: Seq[NodeId] = peers.toStream.sorted
+  def onTransferLeader(msg: Message): Unit = ???
+
+  def onSnapStatus(msg: Message): Unit = ???
+
+  def onPeerUnreachable(msg: Message): Unit = ???
+
+  def onPropose(entries: Array[Entry]): RaftResult[Unit] = ???
 
   val logger = Logger(this.getClass)
 
-  def addNode(id: NodeId): Unit = {
-    this.peers.add(id)
+  def initWithPeers(peers: Seq[Peer]): Unit = {
+    assert(this.log.lastIndex == 0)
+    val initialTerm  = 1
+    val initialIndex = 1
+    this.becomeFollower(initialTerm, INVALID_ID)
+    val entries: Seq[Entry] = peers.zipWithIndex.map {
+      case (p, idx) =>
+        val cc = ConfChange.newBuilder().setChangeType(ConfChangeType.AddNode).setNodeId(p.id)
+        if (p.context.nonEmpty) {
+          cc.setContext(ByteString.copyFrom(p.context.get))
+        }
 
-    this.states match {
-      case LeaderState(prs) => ???
-      // TODO: handle leader state change
+        Entry
+          .newBuilder()
+          .setData(cc.build().toByteString)
+          .setEntryType(EntryType.EntryConfChange)
+          .setTerm(initialTerm)
+          .setIndex(idx + initialIndex)
+          .build()
+    }
+    this.log.append(entries)
+    this.log.committed = entries.length
+    for (peer <- peers) {
+      this.addNode(peer.id)
     }
   }
 
+  def nodes: Seq[NodeId] = peers.toStream.sorted
+
   def hardState: HardState =
     HardState.newBuilder.setTerm(this.term).setVote(this.vote).setCommit(this.log.committed).build()
+
   def softState: SoftState = SoftState(leaderId = this.leaderId, stateRole = this.state)
+
+  def state: RaftRole = this.states match {
+    case _: FollowerState  => Follower
+    case _: LeaderState    => Leader
+    case _: CandidateState => Candidate
+  }
+
+  def tick(): Boolean = ???
+
+  def onCampaign(msg: Message): RaftResult[Unit] = {
+    this.states match {
+      // just do nothing if I am leader
+      case _: LeaderState =>
+      case _              =>
+//        this.log.slice(this.log.applied + 1, this.log.committed + 1)
+    }
+
+    Ok(Unit)
+  }
 
   private def resetRandomizedElectionTimeout(): Unit = {
     val prevTimeout = this.randomizedElectionTimeout
@@ -87,9 +136,21 @@ case class RaftPeer[T <: Storage] private (
   def becomeFollower(term: Long, leaderId: NodeId): Unit = {
     this.reset(term)
     this.leaderId = leaderId
-    this.state = Follower
     this.states = FollowerState()
     logger.info(s"$tag become follower at term($term), leader_id($leaderId)")
+  }
+
+  def addNode(id: NodeId): Unit = {
+    this.peers.add(id)
+
+    // only leader role needs to add new progress
+    this.states match {
+      case LeaderState(prs) if !prs.contains(id) =>
+        // TODO: handle leader state change
+        val lastIdx = this.log.lastIndex
+        val p       = Progress(0L, lastIdx + 1, this.config.maxInflightMegs)
+        prs(id) = p
+    }
   }
 
   private def reset(term: Long): Unit = {
@@ -123,32 +184,24 @@ object RaftPeer {
   def apply[T <: Storage](store: T,
                           id: NodeId,
                           tag: String,
-                          peers: Seq[NodeId],
+//                          peers: Seq[NodeId],
                           applied: Long,
                           config: Config): RaftPeer[T] = {
     import scala.collection.JavaConverters._
 
-    val rs = store.initialState().left.get
-    if (rs.confState.getNodesCount > 0 && peers.nonEmpty) {
-      throw new IllegalArgumentException(
-        s"cannot specify both new($peers) and ConfState.Nodes(${rs.confState.getNodesList})")
-    }
-
-    val existedPeers: Seq[NodeId] = rs.confState.getNodesList.asScala.map(l => l.toLong)
-    if (existedPeers.nonEmpty && peers.nonEmpty) {
-      throw new Exception("cannot specify both new(peers) and ConfState.Nodes")
-    }
-
-    val prs = if (existedPeers.nonEmpty) { existedPeers } else { peers }
-
     val raftLog = RaftLog(store, applied, tag)
+
+    val rs = store.initialState().get
+
+    // NOTICE: Always init peers from log, even no peers exist
+    val existedPeers: Seq[NodeId] = rs.confState.getNodesList.asScala.map(l => l.toLong)
 
     val follower = RaftPeer(
       log = raftLog,
       config = config,
       id = id,
       tag = tag,
-      peers = MutableSet(peers: _*),
+      peers = MutableSet(existedPeers: _*),
       term = rs.hardState.getTerm,
       vote = rs.hardState.getVote
     )

@@ -3,11 +3,11 @@
   */
 
 package org.nonsense.raft
-
-import org.nonsense.raft.RaftLog.Result
+import org.nonsense.raft.RaftLog.RaftResult
 import org.nonsense.raft.error.StorageError
 import org.nonsense.raft.protos.Protos.Entry
 import org.nonsense.raft.storage.Storage
+import org.nonsense.raft.utils.{Err, Ok, Result}
 
 case class RaftLog[T <: Storage] private (
   store: T,
@@ -21,38 +21,38 @@ case class RaftLog[T <: Storage] private (
   def firstIndex: Long = {
     unstable.maybeFirstIndex() match {
       case Some(idx) => idx
-      case None      => this.store.firstIndex().left.get
+      case None      => this.store.firstIndex().ok.get
     }
   }
 
   def lastIndex: Long = {
     unstable.maybeLastIndex() match {
       case Some(idx) => idx
-      case None      => this.store.lastIndex().left.get
+      case None      => this.store.lastIndex().ok.get
     }
   }
 
   def lastTerm: Long = {
     this.term(this.lastIndex) match {
-      case Left(t) => t
-      case Right(e) =>
+      case Ok(t) => t
+      case Err(e) =>
         throw new RuntimeException(s"unexpected error when getting the last term: $e")
     }
   }
 
-  def term(idx: Long): Result[Long] = {
+  def term(idx: Long): RaftResult[Long] = {
     val dummyIdx = this.firstIndex - 1
     if (idx < dummyIdx || idx > this.lastIndex) {
-      Left(0L)
+      Ok(0L)
     } else {
       unstable.maybeTerm(idx) match {
-        case Some(term) => Left(term)
+        case Some(term) => Ok(term)
         case None       => this.store.term(idx)
       }
     }
   }
 
-  def isTermMatch(idx: Long, term: Long): Boolean = this.term(idx).left.toOption.contains(term)
+  def isTermMatch(idx: Long, term: Long): Boolean = this.term(idx).ok.contains(term)
 
   // find_conflict finds the index of the conflict.
   // It returns the first index of conflicting entries between the existing
@@ -92,7 +92,7 @@ case class RaftLog[T <: Storage] private (
 }
 
 object RaftLog {
-  type Result[T] = Either[T, StorageError]
+  type RaftResult[T] = Result[T, StorageError]
 
   /**
     *
@@ -104,9 +104,9 @@ object RaftLog {
     */
   def apply[T <: Storage](store: T, applied: Long, tag: String): RaftLog[T] = {
     assert(applied >= 0)
-    val firstIndex = store.firstIndex().left.get
-    val lastIndex  = store.lastIndex().left.get
-    val rs         = store.initialState().left.get
+    val firstIndex = store.firstIndex().get
+    val lastIndex  = store.lastIndex().get
+    val rs         = store.initialState().get
 
     val log = RaftLog(
       store = store,

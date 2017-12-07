@@ -3,18 +3,19 @@ package org.nonsense.raft.storage
 import org.nonsense.raft.error.StorageError
 import org.nonsense.raft.model.RaftState
 import org.nonsense.raft.protos.Protos.{Entry, Snapshot}
-import org.nonsense.raft.storage.Storage.Result
+import org.nonsense.raft.storage.Storage.StorageResult
+import org.nonsense.raft.utils.Result
 
 trait Storage {
 
-  def initialState(): Result[RaftState]
-  def entries(low: Long, high: Long, maxSize: Long): Result[Vector[Entry]]
-  def term(index: Long): Result[Long]
-  def firstIndex(): Result[Long]
-  def lastIndex(): Result[Long]
-  def snapshot(): Result[Snapshot]
+  def initialState(): StorageResult[RaftState]
+  def entries(low: Long, high: Long, maxSize: Long): StorageResult[Vector[Entry]]
+  def term(index: Long): StorageResult[Long]
+  def firstIndex(): StorageResult[Long]
+  def lastIndex(): StorageResult[Long]
+  def snapshot(): StorageResult[Snapshot]
 }
 
 object Storage {
-  type Result[T] = Either[T, StorageError]
+  type StorageResult[T] = Result[T, StorageError]
 }
