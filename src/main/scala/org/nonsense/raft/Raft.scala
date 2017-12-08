@@ -53,7 +53,6 @@ case class RaftPeer[T <: Storage] private (
   config: Config,
   tag: String,
   id: NodeId,
-  var peers: MutableSet[NodeId],
   var term: TermT,
   var vote: NodeId,
   var leaderId: NodeId = 0,
@@ -66,8 +65,9 @@ case class RaftPeer[T <: Storage] private (
   // candidate state
   votes: mutable.Map[NodeId, Boolean] = mutable.Map(),
   // leader state
-  prs: mutable.Map[NodeId, Progress] = mutable.Map(),
+  private val prs: mutable.Map[NodeId, Progress] = mutable.Map(),
   private var hasPendingConf: Boolean = false,
+  private var leaderTransferee: Option[NodeId] = None,
   // message send by me
   msgs: MutableBuffer[Message] = MutableBuffer()
 ) {
@@ -110,8 +110,8 @@ case class RaftPeer[T <: Storage] private (
     }
   }
 
-  def nodes: Seq[NodeId]  = peers.toStream.sorted
-  @inline def quorum: Int = this.peers.size / 2 + 1
+  def nodes: Seq[NodeId]  = this.prs.keys.toSeq
+  @inline def quorum: Int = this.prs.size / 2 + 1
 
   def hardState: HardState =
     HardState.newBuilder.setTerm(this.term).setVote(this.vote).setCommit(this.log.committed).build()
@@ -314,7 +314,7 @@ case class RaftPeer[T <: Storage] private (
           this.becomeLeader()
       }
     } else {
-      for { peer <- this.peers if peer != this.id } {
+      for { peer <- this.prs.keys if peer != this.id } {
         logger.info("{} [logterm: {}, index: {}] sent {} request to {} at term {}",
                     this.tag,
                     this.log.lastTerm,
@@ -482,12 +482,13 @@ case class RaftPeer[T <: Storage] private (
 
   private def becomeLeader(): Unit = {
     assert(this.role != Follower, "invalid transition [follower -> leader]")
-    this.reset(this.term)
+    val curTerm = this.term
+    this.reset(curTerm)
     // I am the leader
     this.leaderId = this.id
+    this.role = Leader
 
-    // TODO: init progress
-
+    // TODO: why check the uncommitted conf
     val begin = this.log.committed + 1
     val ents = this.log
       .entries(begin, RaftLog.NO_LIMIT)
@@ -495,12 +496,11 @@ case class RaftPeer[T <: Storage] private (
     val numOfConf = RaftPeer.numOfPendingConf(ents)
     if (numOfConf > 1) {
       throw new Exception(s"$tag unexpected double uncommitted config entry")
-    }
-
-    if (numOfConf == 1) {
+    } else if (numOfConf == 1) {
       this.hasPendingConf = true
     }
 
+    // append a entry immediately
     this.appendEntry(mutable.Buffer(Entry.newBuilder()))
     logger.info("{} became leader at term {}", this.tag, this.term)
   }
@@ -544,7 +544,7 @@ case class RaftPeer[T <: Storage] private (
 
   private def bcastAppend(): Unit = {
     for {
-      p <- this.peers if p != this.id
+      p <- this.prs.keys if p != this.id
     } {
       this.sendAppend(p)
     }
@@ -554,15 +554,18 @@ case class RaftPeer[T <: Storage] private (
   private def sendAppend(id: RaftPB.NodeId): Unit = {}
 
   def addNode(id: NodeId): Unit = {
-    this.peers.add(id)
+    // TODO: why set here
+    this.hasPendingConf = false
 
     // only leader role needs to add new progress
     this.role match {
-      case Leader if !prs.contains(id) =>
-        // TODO: handle leader state change
+      case Leader if !this.prs.contains(id) =>
         val lastIdx = this.log.lastIndex
-        val p       = Progress(0L, lastIdx + 1, this.config.maxInflightMegs)
-        prs(id) = p
+        this.prs(id) = Progress(0L, lastIdx + 1, this.config.maxInflightMegs)
+      case Leader =>
+      // Ignore any redundant addNode calls (which can happen because the
+      // initial bootstrapping entries are applied twice).
+      case r => logger.error("cannot add node in role {}", r)
     }
   }
 
@@ -575,6 +578,22 @@ case class RaftPeer[T <: Storage] private (
     this.electionElapsed = 0
     this.heartbeatElapsed = 0
     this.resetRandomizedElectionTimeout()
+
+    // clear candidate state
+    this.votes.clear()
+
+    // clear leader state
+    val (lastIdx, maxInflight) = (this.log.lastIndex, this.config.maxInflightMegs)
+    for { peer <- this.prs.keys } {
+      val progress = Progress(0, lastIdx + 1, maxInflight)
+      if (peer == this.id) {
+        progress.matched = lastIdx
+      }
+      this.prs.update(peer, progress)
+    }
+    this.hasPendingConf = false
+    this.leaderTransferee = None
+    // TODO: check what's read only
   }
 
   private def isElectionTimeouted = this.electionElapsed >= this.randomizedElectionTimeout
@@ -601,13 +620,18 @@ object RaftPeer {
 
     // NOTICE: Always init peers from log, even no peers exist
     val existedPeers: Seq[NodeId] = rs.confState.getNodesList.asScala.map(l => l.toLong)
+    val prs = existedPeers.foldLeft(mutable.Map[NodeId, Progress]()) {
+      case (b, p) =>
+        b(p) = Progress(matched = 0, nextIdx = 1, inflightSize = config.maxInflightMegs)
+        b
+    }
 
     val follower = RaftPeer(
       log = raftLog,
       config = config,
       id = id,
       tag = tag,
-      peers = MutableSet(existedPeers: _*),
+      prs = prs,
       term = rs.hardState.getTerm,
       vote = rs.hardState.getVote
     )
@@ -625,13 +649,6 @@ object RaftPeer {
     )
     follower
   }
-
-//  def isSentFrom(role: RaftRole, msg: Message): Boolean = {
-//    role match {
-//      case Follower  => false
-//      case Candidate => ???
-//    }
-//  }
 
   def numOfPendingConf(entries: mutable.Buffer[Entry]): Int =
     entries.count(e => e.getEntryType == EntryType.EntryConfChange)
