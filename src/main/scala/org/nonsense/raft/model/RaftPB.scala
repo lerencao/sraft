@@ -13,25 +13,24 @@ object RaftPB {
   val INVALID_ID: Long = 0
 
   def limitSize(ents: mutable.Buffer[Entry], maxSize: Long): Unit = {
-    val l = getLimitAtSize(ents, maxSize)
+    val l = getLimitAtSize(ents.iterator, maxSize)
     ents.trimEnd(ents.size - l)
   }
 
-  private def getLimitAtSize[T <: Message, I <% Iterable[T]](entris: I, max: Long): Int = {
+  private def getLimitAtSize[T <: Message](iter: Iterator[T], max: Long): Int = {
     if (max == RaftLog.NO_LIMIT) {
-      entris.size
+      iter.length
     } else {
-      val it = entris.iterator
-      if (!it.hasNext) {
+      if (!iter.hasNext) {
         return 0
       }
 
       // if the first entry size is bigger than max, still return it
-      var size  = it.next().getSerializedSize
+      var size  = iter.next().getSerializedSize
       var limit = 1
 
-      while (it.hasNext && size <= max) {
-        size += it.next().getSerializedSize
+      while (iter.hasNext && size <= max) {
+        size += iter.next().getSerializedSize
         if (size <= max) {
           limit += 1
         }

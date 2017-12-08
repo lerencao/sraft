@@ -5,6 +5,7 @@ import org.nonsense.raft.RaftLog.RaftResult
 import org.nonsense.raft.model.RaftPB.NodeId
 import org.nonsense.raft.protos.Protos._
 import org.nonsense.raft.storage.Storage
+import org.nonsense.raft.utils.Ok
 
 sealed trait SnapshotStatus
 case object Finish  extends SnapshotStatus
@@ -20,7 +21,10 @@ case class RawNode[T <: Storage](
   // Campaign causes this RawNode to transition to candidate state.
   def campaign(): RaftResult[Unit] = {
     val msg = Message.newBuilder().setMsgType(MessageType.MsgHup).build()
-    this.raft.onCampaign(msg)
+    this.raft.onMsgHup(msg)
+//    this.raft.onMsgHup(msg)
+    // TODO: handle the return value
+    Ok(Unit)
   }
 
   def propose(data: Array[Byte], syncLog: Boolean): RaftResult[Unit] = {

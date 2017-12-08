@@ -65,6 +65,15 @@ case class RaftLog[T <: Storage] private (
     }
   }
 
+  // is_up_to_date determines if the given (lastIndex,term) log is more up-to-date
+  // by comparing the index and term of the last entry in the existing logs.
+  // If the logs have last entry with different terms, then the log with the
+  // later term is more up-to-date. If the logs end with the same term, then
+  // whichever log has the larger last_index is more up-to-date. If the logs are
+  // the same, the given log is up-to-date.
+  def isUpToDate(idx: IndexT, term: TermT): Boolean =
+    term > this.lastTerm || (term == this.lastTerm && idx >= this.lastIndex)
+
   def append(ents: Seq[Entry]) = ???
 
   /**
