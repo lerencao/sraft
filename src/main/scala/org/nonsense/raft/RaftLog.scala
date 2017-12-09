@@ -7,6 +7,7 @@ import org.nonsense.raft.RaftLog.RaftResult
 import org.nonsense.raft.error.{Compacted, StorageError, Unavailable}
 import org.nonsense.raft.model.RaftPB
 import org.nonsense.raft.model.RaftPB.{IndexT, TermT}
+import org.nonsense.raft.protos.Protos
 import org.nonsense.raft.protos.Protos.Entry
 import org.nonsense.raft.storage.Storage
 import org.nonsense.raft.storage.Storage.StorageResult
@@ -23,6 +24,11 @@ case class RaftLog[T <: Storage] private (
   tag: String
 ) {
 
+  def snapshot(): RaftResult[Protos.Snapshot] = this.unstable.snapshot match {
+    case Some(s) => Ok(s)
+    case None    => this.store.snapshot()
+  }
+
   def maybeCommit(maxIdx: IndexT, term: TermT): Boolean = {
     // always commit log of my term
     if (maxIdx > this.committed && this.term(maxIdx).getOrElse(0) == term) {
@@ -31,6 +37,32 @@ case class RaftLog[T <: Storage] private (
     } else {
       false
     }
+  }
+
+  // maybe_append returns None if the entries cannot be appended. Otherwise,
+  // it returns Some(last index of new entries).
+  def maybeAppend(logIdx: IndexT,
+                  logTerm: TermT,
+                  committed: IndexT,
+                  ents: mutable.Buffer[Entry]): Option[IndexT] = {
+    if (!this.isTermMatch(logIdx, logTerm)) {
+      return None
+    }
+
+    val conflictIdx = this.findConflict(ents)
+    if (conflictIdx == 0) {
+      // it's ok
+    } else if (conflictIdx <= this.committed) {
+      throw new Exception(
+        s"${this.tag} entry $conflictIdx conflict with committed entry ${this.committed}")
+    } else {
+      assert(logIdx == ents.head.getIndex - 1)
+      this.append(ents.iterator.drop((conflictIdx - ents.head.getIndex).toInt).toSeq)
+    }
+
+    val lastNewIdx = logIdx + ents.length
+    this.commitTo(Math.min(committed, lastNewIdx))
+    Some(lastNewIdx)
   }
 
   def commitTo(toCommit: RaftPB.IndexT): Unit = {
@@ -74,7 +106,22 @@ case class RaftLog[T <: Storage] private (
   def isUpToDate(idx: IndexT, term: TermT): Boolean =
     term > this.lastTerm || (term == this.lastTerm && idx >= this.lastIndex)
 
-  def append(ents: Seq[Entry]) = ???
+  /**
+    * append entries, truncate if necessary
+    * @param ents to be append
+    * @return last index of the log
+    */
+  def append(ents: Seq[Entry]): IndexT = {
+    if (ents.nonEmpty) {
+      if (ents.head.getIndex <= this.committed) {
+        throw new Exception(
+          s"$tag entry head ${ents.head.getIndex} is out of range (committed ${this.committed} ..]")
+      }
+      this.unstable.truncateAndAppend(ents)
+    }
+
+    this.lastIndex
+  }
 
   /**
     * get entry slice,

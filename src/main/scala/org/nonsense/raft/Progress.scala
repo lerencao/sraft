@@ -52,7 +52,7 @@ class Progress(
   // into inflights in order.
   // When a leader receives a reply, the previous inflights should
   // be freed by calling inflights.freeTo.
-  var ins: Inflights
+  private var ins: Inflights
 ) {
 
   def reset(state: ProgressState): Unit = {
@@ -114,6 +114,10 @@ class Progress(
 
   def optimisticUpdate(n: IndexT): Unit = {
     this.nextIndex = n + 1
+  }
+
+  def addInFlight(idx: IndexT): Unit = {
+    this.ins.add(idx)
   }
 
   // maybe_decr_to returns false if the given to index comes from an out of order message.

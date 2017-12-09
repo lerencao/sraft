@@ -8,13 +8,15 @@ import com.typesafe.scalalogging.Logger
 import org.nonsense.raft.RaftLog.RaftResult
 import org.nonsense.raft.RaftPeer.{CAMPAIGN_ELECTION, CAMPAIGN_PRE_ELECTION}
 import org.nonsense.raft.ReadOnlyOption.Safe
+import org.nonsense.raft.error.SnapshotTemporarilyUnavailable
 import org.nonsense.raft.model.RaftPB
 import org.nonsense.raft.model.RaftPB.{INVALID_ID, NodeId, TermT}
 import org.nonsense.raft.protos.Protos
 import org.nonsense.raft.protos.Protos._
 import org.nonsense.raft.storage.Storage
-import org.nonsense.raft.utils.Ok
+import org.nonsense.raft.utils.{Err, Ok}
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.{Buffer => MutableBuffer, Set => MutableSet}
 import scala.concurrent.forkjoin.ThreadLocalRandom
@@ -205,17 +207,35 @@ case class RaftPeer[T <: Storage] private (
       }
     }
 
+    // handle vote message for all role
     msgType match {
       case MessageType.MsgRequestPreVote | MessageType.MsgRequestVote =>
         this.onMsgRequestPreVoteOrVote(msg)
+        return
+    }
 
-      case MessageType.MsgRequestPreVoteResponse if this.role == PreCandidate =>
-        // Only handle vote responses corresponding to our candidacy (while in
-        // state Candidate, we may get stale MsgPreVoteResp messages in this term from
-        // our pre-candidate state).
-        this.onMsgRequestPreVoteOrVoteResponse(msg)
-      case MessageType.MsgRequestVoteResponse if this.role == Candidate =>
-        this.onMsgRequestPreVoteOrVoteResponse(msg)
+    this.role match {
+      case Follower =>
+        msgType match {
+          case MessageType.MsgAppend =>
+            this.electionElapsed = 0
+            this.leaderId = msg.getFrom
+            this.handleAppendEntries(msg)
+        }
+      case PreCandidate | Candidate =>
+        msgType match {
+          case MessageType.MsgRequestPreVoteResponse | MessageType.MsgRequestVoteResponse =>
+            this.onMsgRequestPreVoteOrVoteResponse(msg)
+          case MessageType.MsgAppend =>
+            this.becomeFollower(this.term, msg.getFrom)
+            this.handleAppendEntries(msg)
+        }
+
+      case Leader =>
+        msgType match {
+          case _ =>
+        }
+
     }
   }
 
@@ -227,6 +247,9 @@ case class RaftPeer[T <: Storage] private (
         message.getMsgType == MessageType.MsgRequestVoteResponse)
 
     val curTerm = this.term
+    // Only handle vote responses corresponding to our candidacy (while in
+    // state Candidate, we may get stale MsgPreVoteResp messages in this term from
+    // our pre-candidate state).
     this.role match {
       case PreCandidate if message.getMsgType == MessageType.MsgRequestPreVoteResponse =>
         val gr = this.poll(message.getFrom, message.getMsgType, !message.getReject)
@@ -240,7 +263,7 @@ case class RaftPeer[T <: Storage] private (
         val gr = this.poll(message.getFrom, message.getMsgType, !message.getReject)
         if (this.quorum == gr) {
           this.becomeLeader()
-          this.bcastAppend()
+
         } else if (this.quorum == votes.size - gr) {
           this.becomeFollower(curTerm, INVALID_ID)
         }
@@ -503,6 +526,9 @@ case class RaftPeer[T <: Storage] private (
     // append a entry immediately
     this.appendEntry(mutable.Buffer(Entry.newBuilder()))
     logger.info("{} became leader at term {}", this.tag, this.term)
+
+    // call bcast append even no peer exists.
+    this.bcastAppend()
   }
 
   private def appendEntry(partialEnts: mutable.Buffer[Protos.Entry.Builder]): Unit = {
@@ -542,6 +568,7 @@ case class RaftPeer[T <: Storage] private (
     }
   }
 
+  // send append message or snapshot message to all peers of me
   private def bcastAppend(): Unit = {
     for {
       p <- this.prs.keys if p != this.id
@@ -551,7 +578,117 @@ case class RaftPeer[T <: Storage] private (
   }
 
   // send_append sends RPC, with entries to the given peer.
-  private def sendAppend(id: RaftPB.NodeId): Unit = {}
+  private def sendAppend(to: RaftPB.NodeId): Unit = {
+    val progress = this.prs(to)
+    if (progress.isPaused) {
+      return
+    }
+
+    val term = this.log.term(progress.nextIndex - 1)
+    val ents = this.log.entries(progress.nextIndex, this.config.maxSizePerMsg)
+    val msg: Message.Builder = if (term.isErr || ents.isErr) {
+      // send snapshot if we failed to get term or entries
+      prepareSendSnapshot(to) match {
+        case None    => return
+        case Some(m) => m
+      }
+    } else { // send entries
+      this.prepareSendEntries(to, term.get, ents.get)
+    }
+
+    this.send(msg)
+  }
+
+  private def handleAppendEntries(message: Protos.Message): Unit = {
+    assert(message.getMsgType == MessageType.MsgAppend)
+    assert(this.role == Follower)
+
+    val m = Message
+      .newBuilder()
+      .setFrom(this.id)
+      .setTo(message.getFrom)
+      .setMsgType(MessageType.MsgAppendResponse)
+
+    if (message.getIndex < this.log.committed) {
+      m.setIndex(this.log.committed)
+    } else {
+      this.log.maybeAppend(message.getIndex,
+                           message.getLogTerm,
+                           message.getCommit,
+                           message.getEntriesList.asScala)
+    }
+
+    this.send(m)
+  }
+
+  private def prepareSendEntries(
+    to: RaftPB.NodeId,
+    term: TermT,
+    entries: mutable.Buffer[Protos.Entry]
+  ): Message.Builder = {
+    import scala.collection.JavaConverters._
+    val progress = this.prs(to)
+    val m = Message
+      .newBuilder()
+      .setTo(to)
+      .setMsgType(MessageType.MsgAppend)
+      .setIndex(progress.nextIndex - 1)
+      .setLogTerm(term)
+      .addAllEntries(entries.asJavaCollection)
+      .setCommit(this.log.committed)
+
+    if (m.getEntriesCount > 0) {
+      progress.state match {
+        case ReplicateState =>
+          val lastEntryIdx = m.getEntriesBuilderList.get(m.getEntriesCount - 1).getIndex
+          progress.optimisticUpdate(lastEntryIdx)
+          progress.addInFlight(lastEntryIdx)
+        case ProbeState => progress.pause()
+        case s          => throw new Exception(s"$tag is sending append in unhandled state $s")
+      }
+    }
+    m
+  }
+
+  private def prepareSendSnapshot(to: RaftPB.NodeId): Option[Message.Builder] = {
+    val pr = this.prs(to)
+    if (!pr.recentActive) {
+      logger.debug("{} ignore sending snapshot to {} since it is not recently active", this.tag, to)
+      return None
+    }
+
+    val m = Message.newBuilder().setMsgType(MessageType.MsgSnapshot).setTo(to)
+    val snap: Snapshot = this.log.snapshot() match {
+      case Err(SnapshotTemporarilyUnavailable) =>
+        logger.debug(
+          "{} failed to send snapshot to {} because snapshot is termporarily unavailable",
+          this.tag,
+          to)
+        return None
+      case Err(e) => throw new Exception(s"$tag unexpected error: $e")
+      case Ok(sn) if sn.getMetadata.getIndex == 0 =>
+        throw new Exception(s"$tag need non-empty snapshot")
+      case Ok(sn) => sn
+    }
+    m.setSnapshot(snap)
+
+    val (sidx, sterm) = (snap.getMetadata.getIndex, snap.getMetadata.getTerm)
+    logger.debug(
+      "{} [firstindex: {}, commit: {}] sent snapshot[index: {}, term: {}] to {} [{}]",
+      this.tag,
+      this.log.firstIndex,
+      this.log.committed,
+      sidx,
+      sterm,
+      to,
+      pr
+    )
+    pr.becomeSnapshot(sidx)
+
+    logger.debug("{} paused sending replication messages to {} [{}]", this.tag, to, pr)
+
+    Some(m)
+  }
 
   def addNode(id: NodeId): Unit = {
     // TODO: why set here
