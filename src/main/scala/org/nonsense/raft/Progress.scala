@@ -44,7 +44,7 @@ class Progress(
   // recent_active is true if the progress is recently active. Receiving any messages
   // from the corresponding follower indicates the progress is active.
   // RecentActive can be reset to false after an election timeout.
-  var recentActive: Boolean = false,
+  private var recentActive: Boolean = false,
   // Inflights is a sliding window for the inflight messages.
   // When inflights is full, no more message should be sent.
   // When a leader sends out a message, the index of the last
@@ -156,6 +156,10 @@ class Progress(
     case ProbeState     => this.paused
     case ReplicateState => this.ins.isFull
     case SnapshotState  => true
+  }
+
+  def setRecentActive(active: Boolean): Unit = {
+    this.recentActive = active
   }
 }
 

@@ -49,6 +49,8 @@ case class RaftLog[T <: Storage] private (
       return None
     }
 
+    assert(logIdx == ents.head.getIndex - 1)
+
     val conflictIdx = this.findConflict(ents)
     if (conflictIdx == 0) {
       // it's ok
@@ -56,13 +58,12 @@ case class RaftLog[T <: Storage] private (
       throw new Exception(
         s"${this.tag} entry $conflictIdx conflict with committed entry ${this.committed}")
     } else {
-      assert(logIdx == ents.head.getIndex - 1)
       this.append(ents.iterator.drop((conflictIdx - ents.head.getIndex).toInt).toSeq)
     }
 
-    val lastNewIdx = logIdx + ents.length
-    this.commitTo(Math.min(committed, lastNewIdx))
-    Some(lastNewIdx)
+    val newLastIdx = logIdx + ents.length
+    this.commitTo(Math.min(committed, newLastIdx))
+    Some(newLastIdx)
   }
 
   def commitTo(toCommit: RaftPB.IndexT): Unit = {
@@ -253,7 +254,7 @@ case class RaftLog[T <: Storage] private (
 }
 
 object RaftLog {
-  val NO_LIMIT = Long.MaxValue
+  val NO_LIMIT: IndexT = Long.MaxValue
   type RaftResult[T] = Result[T, StorageError]
 
   /**

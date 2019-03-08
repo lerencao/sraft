@@ -233,7 +233,12 @@ case class RaftPeer[T <: Storage] private (
 
       case Leader =>
         msgType match {
-          case _ =>
+          case MessageType.MsgAppendResponse =>
+            if (!this.prs.contains(msg.getFrom)) {
+              logger.debug("{} no progress available for {}", this.tag, msg.getFrom)
+              return
+            }
+            this.handleAppendResponse(msg)
         }
 
     }
@@ -599,26 +604,55 @@ case class RaftPeer[T <: Storage] private (
     this.send(msg)
   }
 
-  private def handleAppendEntries(message: Protos.Message): Unit = {
-    assert(message.getMsgType == MessageType.MsgAppend)
+  private def handleAppendEntries(req: Protos.Message): Unit = {
+    assert(req.getMsgType == MessageType.MsgAppend)
     assert(this.role == Follower)
 
-    val m = Message
+    val resp = Message
       .newBuilder()
       .setFrom(this.id)
-      .setTo(message.getFrom)
+      .setTo(req.getFrom)
       .setMsgType(MessageType.MsgAppendResponse)
 
-    if (message.getIndex < this.log.committed) {
-      m.setIndex(this.log.committed)
+    if (req.getIndex < this.log.committed) {
+      resp.setIndex(this.log.committed)
     } else {
-      this.log.maybeAppend(message.getIndex,
-                           message.getLogTerm,
-                           message.getCommit,
-                           message.getEntriesList.asScala)
+      this.log.maybeAppend(req.getIndex, req.getLogTerm, req.getCommit, req.getEntriesList.asScala) match {
+        case Some(mlastIdx) =>
+          resp.setIndex(mlastIdx)
+        case None =>
+          logger.debug(
+            "{} [logterm: {}, index: {}] rejected msgApp [logterm: {}, index: {}] from {}",
+            this.tag,
+            this.log.term(req.getIndex).getOrElse(0),
+            req.getIndex,
+            req.getLogTerm,
+            req.getIndex,
+            req.getFrom
+          )
+          resp.setIndex(req.getIndex)
+          resp.setReject(true)
+          resp.setRejectHint(this.log.lastIndex)
+      }
     }
 
-    this.send(m)
+    this.send(resp)
+  }
+
+  private def handleAppendResponse(resp: Protos.Message): Unit = {
+    // TODO: check prs
+    val pr = this.prs(resp.getFrom)
+    pr.setRecentActive(true)
+
+    // when rejected by follower
+    if (resp.getReject) {
+      logger.debug("{} received msgAppend rejection(lastindex: {}) from {} for index {}",
+                   this.tag,
+                   resp.getRejectHint,
+                   resp.getFrom,
+                   resp.getIndex)
+      if (pr.maybeDecrTo(resp.getIndex, resp.getRejectHint)) {}
+    } else {}
   }
 
   private def prepareSendEntries(
